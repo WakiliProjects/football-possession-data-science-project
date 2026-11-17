@@ -1,0 +1,22 @@
+# Match data -- licensed for the competition only, never committed
+data/
+*.mp4
+*.zip
+*_atd.txt
+*_atd.xml
+*_smart_tagging.xml
+*homography*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Scorer outputs
+eval/results/
+eval/reports/
+eval/scoreboard.csv
+
+# Local notes
+SESSION_SUMMARY.md

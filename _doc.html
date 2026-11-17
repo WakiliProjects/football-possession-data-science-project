@@ -1,0 +1,406 @@
+<!doctype html><html><head><meta charset='utf-8'><style>@page { size: A4; margin: 18mm 16mm; }
+body{font-family:'DejaVu Sans',Arial,sans-serif;font-size:10.3px;line-height:1.45;color:#1a1a1a;}
+h1{font-size:20px;border-bottom:2px solid #333;padding-bottom:4px;}
+h2{font-size:15px;margin-top:18px;border-bottom:1px solid #ccc;padding-bottom:2px;}
+h3{font-size:12.5px;margin-top:12px;}
+code{font-family:'DejaVu Sans Mono',monospace;font-size:9.3px;background:#f4f4f4;padding:1px 3px;border-radius:3px;}
+pre{background:#f4f4f4;padding:8px;border-radius:4px;font-size:8.6px;line-height:1.3;white-space:pre;}
+pre code{background:none;padding:0;}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:9px;}
+th,td{border:1px solid #bbb;padding:3px 5px;text-align:left;vertical-align:top;}
+th{background:#eee;} hr{border:none;border-top:1px solid #ddd;margin:14px 0;} a{color:#1a4f8a;text-decoration:none;}</style></head><body><h1>Dataculer: Technical Document</h1>
+<p><strong>More than a Hack 2027, Phase 1: Ball Possession</strong>
+<strong>Team:</strong> Dataculer · <strong>Submission file:</strong> <code>Dataculer.csv</code> · <strong>Code:</strong> https://github.com/WakiliProjects/football-possession-data-science-project</p>
+<hr />
+<h2>1. The approach</h2>
+<h3>What we built</h3>
+<p>A three-state hidden Markov model (Home, Away and Dead) decoded over each half of the match,
+followed by five rules that apply the labelling conventions of <code>CHALLENGE.md</code>. The whole
+pipeline is <code>solve.py</code>, needs only numpy and pandas, runs in about 8 seconds and uses no
+random numbers.</p>
+<pre><code>tracking (ATD) -&gt; per-frame signals -&gt; anchors -&gt; HMM tables -&gt; Viterbi -&gt; conventions -&gt; Dataculer.csv
+                  ball-to-player dist   frames     alive/dead    H / A / D   single touch,
+                  ball speed            whose       from anchors; every       restart timing,
+                  median player speed   state is    Home vs Away  0.2 s       kick-offs
+                  goalkeeper fix        certain     by EM
+</code></pre>
+<h3>Why this design</h3>
+<p>The ranking metric counts whole possessions, so the output has to be a segmentation rather than
+a per-frame vote. Three facts about the data shaped the model.</p>
+<p><strong>1. The ball is not missing at random.</strong> Inside the graded frames the ball track has only 150
+gaps, and 133 of them are longer than 4 seconds. The tracker bridges short losses itself, so
+what remains are long holes, and most are stoppages: the ball is in a player's hands, off the
+pitch or outside the camera's interest. A gap is therefore evidence about dead or alive, not
+about which team.</p>
+<p><strong>2. Half of the dead time has a visible ball.</strong> In the public window, two of the four stoppages
+have the ball tracked throughout as it rolls away, is carried back and is placed. A "no ball
+means dead" rule, like the starter baseline, cannot see these. They
+are recognisable from the combination of signals: nobody near a slow ball, players walking and
+a ball lying still.</p>
+<p><strong>3. Goalkeeper tracks carry the wrong team 11% of the time.</strong> The two track slots that live next
+to a goal are the goalkeepers, but the tracker regularly parks the away-keeper slot on the home
+keeper and the reverse. Each time, a back-pass to the keeper looks like a turnover. A keeper does
+not leave his own half, so we assign those two slots by pitch side rather than by slot. This
+affects 11.3% of graded frames.</p>
+<p>A hidden Markov model fits this problem. The three states are exactly the three labels, the
+transition matrix expresses that possessions last seconds rather than frames, and the emission
+tables weigh several weak signals at once.</p>
+<h3>No ground truth in the fit</h3>
+<p>We did not want a model fitted to 17 possessions. The emission tables are estimated from the
+match itself, from frames whose state follows from physics. We call these the anchors.</p>
+<table>
+<thead>
+<tr>
+<th>Anchor</th>
+<th>Definition</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ball out</td>
+<td>Ball at least 1 m outside the lines for 1.5 s, or until it is lost</td>
+<td>Dead</td>
+</tr>
+<tr>
+<td>Stoppage gap</td>
+<td>Ball untracked for 4 s or more while the median player walks (under 2 m/s)</td>
+<td>Dead</td>
+</tr>
+<tr>
+<td>Ball at rest</td>
+<td>Ball inside the pitch moving under 0.5 m/s for 3 s</td>
+<td>Dead</td>
+</tr>
+<tr>
+<td>Pass chain</td>
+<td>Three or more consecutive touches by one team, linked by passes (ball above 7 m/s, no opponent touch between)</td>
+<td>Alive</td>
+</tr>
+</tbody>
+</table>
+<p>Dead anchors cover 41.4% of the graded frames, and alive anchors cover 11.7%. The alive and dead
+tables are the feature histograms over these two sets. Dead anchors are also hard constraints
+during decoding. The first two rows of the table show why the signals separate the states: a ball
+more than 6 m from every player takes 8.5% of alive frames and 45.7% of dead ones, and a median
+player speed under 1.2 m/s takes 15% of alive frames and 65% of dead ones.</p>
+<p>The Home and Away split cannot come from anchors, so it is fitted by EM: 15 iterations of
+forward-backward over the full match, under one constraint, that swapping the teams swaps the
+table. EM settles on a team in possession being in clear contact with the ball 33% of the time
+and in contact under pressure 10.5% of the time, while its opponent touches it 2.3% of the time.</p>
+<p>The transition matrix is not fitted. It is set from three round priors chosen in advance from
+general football knowledge, not from this match: a possession of about 10 s, a stoppage of about
+20 s and most possessions (about 70%) ending in a turnover rather than a stoppage. Section 5 shows
+the output does not change across a wide range of all three.</p>
+<h3>Features</h3>
+<p>Each 0.2 s step emits two discrete features.</p>
+<ul>
+<li><strong>Contact by ball speed</strong> (30 values). Contact is one of: nobody within 1.5 m, nobody within
+  6 m, home clear, home under pressure (an opponent within 3 m), away under pressure or away
+  clear. Ball speed is binned at 1, 3, 7 and 12 m/s. The pairing matters, because a ball far
+  from everyone is a long pass when fast and a stoppage when slow.</li>
+<li><strong>Median player speed</strong> (6 values, binned at 0.8, 1.2, 1.6, 2.2 and 3.0 m/s).</li>
+</ul>
+<p>When the ball is not tracked the first feature contributes nothing, so the state is carried by
+player speed and by the transition matrix. Viterbi runs on integer scores, and the tables are
+rounded to four decimals first, so the output does not depend on floating-point details.</p>
+<hr />
+<h2>2. Assets used and how</h2>
+<table>
+<thead>
+<tr>
+<th>Asset</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BAR-ATH_tactical_atd.txt</code></td>
+<td>The input. Ball position, player positions and speeds for all 46 track slots.</td>
+</tr>
+<tr>
+<td><code>BAR-ATH_tactical_atd.xml</code></td>
+<td>Maps each track slot to a team.</td>
+</tr>
+<tr>
+<td><code>BAR-ATH_tactical_smart_tagging.xml</code></td>
+<td>Kick-offs only (6 tags), each accepted only if the ball is tracked within 8 m of the centre spot in the tag window. Five are confirmed. The sixth, tagged at frame 62012 with no ball near the centre, is ignored. A <code>GOALS</code> tag ending at a confirmed kick-off marks the time between goal and kick-off as dead.</td>
+</tr>
+<tr>
+<td><code>eval/gt/BAR-ATH_possession_gt_public.csv</code></td>
+<td>Verification only. We used it to align frames, to read the labelling convention so we understood what counts as possession and to run the format and score checks in section 5. No table, constant or rule was fitted, tuned or searched against it. <code>Dataculer.csv</code> is produced from the tracking and tagging alone, and the ground-truth file is read only by the optional <code>--score</code> check.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Tried and dropped</strong></p>
+<table>
+<thead>
+<tr>
+<th>What</th>
+<th>Why it was dropped</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Smart Tagging team tags (Progression, Build Up, Transitions and so on) as evidence for the team in possession</td>
+<td>In the public window these tags name the team in possession on 76% of the live frames they cover (73% for Progression). Contact evidence alone is right on 92% of live frames there, so the tags would add noise rather than information.</td>
+</tr>
+<tr>
+<td>Smart Tagging set-piece windows as dead-ball evidence</td>
+<td>Every window is exactly 35 s, the restart falls anywhere inside it, and only 59 set pieces are tagged against the 114 stoppages we find. We use them as an independent check instead (section 5).</td>
+</tr>
+<tr>
+<td>Unconstrained EM on all tables</td>
+<td>It converges to the wrong states. Dead becomes "ball not tracked" in one variant and "players slow" in another, with 65% of frames dead. The anchors prevent this.</td>
+</tr>
+<tr>
+<td>Homography</td>
+<td>The tracking is already in pitch coordinates. Not used.</td>
+</tr>
+<tr>
+<td>Broadcast tracking</td>
+<td>On its own timeline with cuts and replays, and no mapping to the tactical frames. Not used.</td>
+</tr>
+<tr>
+<td>Video</td>
+<td>Not used. We never checked the output against the video.</td>
+</tr>
+<tr>
+<td>The ball's third column in the ATD file</td>
+<td>Present on 10% of rows, mostly before kick-off, and uncorrelated with ball speed. Ignored.</td>
+</tr>
+</tbody>
+</table>
+<p>No external data, pre-trained model or LLM is part of the pipeline. No frame was labelled by
+hand.</p>
+<hr />
+<h2>3. Possession rules implemented</h2>
+<p><strong>Control.</strong> A player can play the ball when it is within 1.5 m of him. Contact is clear when no
+opponent is within 3 m of the ball, and pressed otherwise. Pressed contact is weaker evidence,
+because under pressure the tracked distances cannot tell the carrier from the challenger.</p>
+<p><strong>Loose balls and passes in flight.</strong> With nobody within 1.5 m, the feature is identical for Home
+and Away, so the model has no reason to switch, and the team that last had the ball keeps it. This
+is the convention in <code>CHALLENGE.md</code>.</p>
+<p><strong>Challenges, deflections and single touches.</strong> A change of possession needs sustained evidence.
+With the fitted tables, roughly two 0.2 s steps of clear opponent contact outweigh the cost of a
+switch, and more when the contact is pressed. In addition, a possession shorter than 1 s that sits
+inside the other team's possession is treated as a single touch and removed.</p>
+<p><strong>When a turnover happens.</strong> The boundary is placed on the first frame the new team is in contact
+with the ball after the old team's last contact, which is the reception rather than the pass.</p>
+<p><strong>Dead ball.</strong> A stoppage is what the HMM decodes as Dead: mostly the anchors (ball out, a long
+gap with walking players or a ball at rest) extended to the frames around them where the ball is
+slow, the ball is far from players and the players are walking. Dead-ball ownership is never
+labelled. Two rules clean the result:</p>
+<ul>
+<li>a stoppage shorter than 4 s that no anchor supports is discarded, since a high ball that
+  projects far from every player can look like one;</li>
+<li>play between two stoppages must last 2 s and contain a ball faster than 7 m/s, because a player
+  walking the ball to the corner flag is not a possession.</li>
+</ul>
+<p><strong>Restarts.</strong> Play resumes when the ball leaves its resting spot. Within 3 s before the decoded
+restart we find the last frame with the ball under 1.5 m/s and move the restart to the first
+frame after it above 3 m/s. If the ball only reappears at the restart, as with most throw-ins,
+the decoded time stands. The team that restarts is whichever team the model sees in contact
+first, and it is not taken from the tags.</p>
+<p><strong>Kick-offs.</strong> A confirmed kick-off tag fixes the restart on the frame where the ball is nearest
+the centre spot. Everything from the start of the second half to its kick-off is Dead (the
+decoded kick-off is frame 113743). The first half is treated as live from its first graded frame.</p>
+<p><strong>Ungraded frames</strong> (before the match, at half-time and after the final whistle) are written as
+<code>D</code>. We never write <code>X</code>, because the model always has a best guess, and an abstention is worth no
+more than repeating the previous label.</p>
+<hr />
+<h2>4. Limitations</h2>
+<p><strong>Short possessions.</strong> On the public window the ground truth has 17 possessions, and we report 12.
+Of the six we fail to match, four are under 3.6 s (19, 33, 71 and 90 frames), and the tracking
+does not separate them from touches the ground truth ignores: a 7-frame home touch counts as a
+possession at frame 15358, while an 18-frame one at 15272 does not. We chose not to chase them.
+Across the match this costs recall on brief possessions and merges their neighbours.</p>
+<p><strong>High balls.</strong> The ball is projected onto the pitch plane, so a ball in the air appears metres
+away from the player who heads or receives it. Aerial duels and long clearances are the main
+source of late or missed turnovers. The first turnover of the match, at frame 11351, is found 115
+frames late for this reason.</p>
+<p><strong>Team identity of outfield tracks.</strong> We repair the goalkeepers only. Outfield slots also swap
+identity when players cross, and a swap between opponents flips the contact evidence until the
+track ends. We did not find a reliable way to detect this without the video.</p>
+<p><strong>Stoppages with no anchor.</strong> A foul followed by a quick free kick, with the ball tracked and
+moving the whole time, leaves little to see. In the other direction, a goalkeeper holding the ball
+while his track is lost looks like a ball lying far from everyone. The start of a stoppage is
+located less precisely than its end: in the public window the four starts are off by 2, 11, 21 and 75 frames, and the four restarts by 2, 9, 17 and 34.</p>
+<p><strong>Slow restarts.</strong> After a short goal kick or a back-pass restart, the players are still walking
+and the ball is slow, so the model can stay in Dead one pass too long. This is the 34-frame error
+above.</p>
+<p><strong>One match.</strong> Every constant is a physical quantity set in advance, and section 5 shows the
+output barely moves when they change, but none of it has been tested on a second match.</p>
+<p><strong>With more time</strong> we would use the video to estimate ball height, or at least detect flight from
+the shape of the projected trajectory; detect outfield identity swaps from formation consistency;
+align the broadcast tracking to recover the ball where the tactical tracker loses it; and replace
+the fixed-rate transitions with explicit duration distributions.</p>
+<hr />
+<h2>5. Verification</h2>
+<p>All numbers below come from the official <code>run_evaluation.py</code> and from <code>solve.py</code>.</p>
+<p><strong>Public 5-minute window</strong> (7,500 frames, 17 possessions):</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>spellF1</th>
+<th>macroF1</th>
+<th>F1 H / A / D</th>
+<th>alive/dead F1</th>
+<th>transition F1 (within 1 s)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>This pipeline</td>
+<td>0.5517</td>
+<td>0.9177</td>
+<td>0.913 / 0.900 / 0.941</td>
+<td>0.9859</td>
+<td>0.457</td>
+</tr>
+</tbody>
+</table>
+<p>The scorer's bootstrap interval for our spellF1 on this window is 0.36 to 0.73, and one
+possession moves it by about 0.06, so a single short possession swings it. The frame-level columns
+are far less noisy. This window is only 7,500 frames and we used it as a check, so the full-match
+score may well be lower.</p>
+<p><strong>An independent check over the full match.</strong> Smart Tagging lists 59 set pieces. The model does
+not use them, apart from kick-offs, so they can test it, since a tagged set piece should contain a
+restart. Counting a Dead-to-alive transition between 10 s before the tag window and its end, our
+output has one for 53 of the 59 set pieces.</p>
+<p><strong>Full-match output.</strong> 241 possessions (mean 13.0 s) and 114 stoppages. Graded frames are 33%
+Home, 17% Away and 51% Dead. That is about 52 minutes of ball in play out of 106 graded, and a
+66 to 34 split of live time.</p>
+<p><strong>Sensitivity.</strong> Each constant was changed on its own and the pipeline re-run. Agreement is the
+share of graded frames with the same label as the submitted file. Self-spellF1 is the official
+spellF1 of the variant scored against the submitted file, over the full match.</p>
+<table>
+<thead>
+<tr>
+<th>Change</th>
+<th>Possessions</th>
+<th>Stoppages</th>
+<th>Agreement</th>
+<th>Self-spellF1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>submitted</td>
+<td>241</td>
+<td>114</td>
+<td>1.000</td>
+<td>1.000</td>
+</tr>
+<tr>
+<td>decision step 4 / 6 / 8 frames (5)</td>
+<td>263 / 231 / 208</td>
+<td>114 / 111 / 110</td>
+<td>0.979 / 0.980 / 0.977</td>
+<td>0.89 / 0.90 / 0.87</td>
+</tr>
+<tr>
+<td>contact radius 1.2 / 1.8 m (1.5)</td>
+<td>226 / 277</td>
+<td>114 / 112</td>
+<td>0.980 / 0.980</td>
+<td>0.92 / 0.87</td>
+</tr>
+<tr>
+<td>pressure radius 2.5 / 4 m (3)</td>
+<td>243 / 248</td>
+<td>113 / 111</td>
+<td>0.996 / 0.990</td>
+<td>0.97 / 0.94</td>
+</tr>
+<tr>
+<td>loose-ball distance 5 / 8 m (6)</td>
+<td>242 / 240</td>
+<td>114 / 114</td>
+<td>0.996 / 0.995</td>
+<td>0.99 / 0.98</td>
+</tr>
+<tr>
+<td>walking speed 1.7 / 2.3 m/s (2.0)</td>
+<td>239 / 245</td>
+<td>112 / 116</td>
+<td>0.995 / 0.992</td>
+<td>0.99 / 0.97</td>
+</tr>
+<tr>
+<td>stoppage gap 3 / 6 s (4)</td>
+<td>241 / 238</td>
+<td>114 / 110</td>
+<td>1.000 / 0.994</td>
+<td>1.00 / 0.99</td>
+</tr>
+<tr>
+<td>ball-out margin 0.5 / 2 m (1)</td>
+<td>241 / 240</td>
+<td>115 / 109</td>
+<td>0.997 / 0.993</td>
+<td>0.99 / 0.97</td>
+</tr>
+<tr>
+<td>mean possession 8 / 16 s (10)</td>
+<td>251 / 235</td>
+<td>114 / 114</td>
+<td>0.995 / 0.999</td>
+<td>0.96 / 0.98</td>
+</tr>
+<tr>
+<td>mean stoppage 15 / 30 s (20)</td>
+<td>241 / 241</td>
+<td>114 / 114</td>
+<td>1.000 / 1.000</td>
+<td>1.00 / 1.00</td>
+</tr>
+<tr>
+<td>turnover share 0.6 / 0.8 (0.7)</td>
+<td>237 / 249</td>
+<td>114 / 114</td>
+<td>0.999 / 0.996</td>
+<td>0.99 / 0.97</td>
+</tr>
+<tr>
+<td>shortest stoppage 3 / 5 s (4)</td>
+<td>245 / 238</td>
+<td>122 / 110</td>
+<td>0.995 / 0.997</td>
+<td>0.98 / 0.98</td>
+</tr>
+<tr>
+<td>single-touch rule off / 1.5 s (1)</td>
+<td>263 / 229</td>
+<td>114 / 114</td>
+<td>0.997 / 0.998</td>
+<td>0.95 / 0.97</td>
+</tr>
+<tr>
+<td>table pseudo-count 1 / 20 (5)</td>
+<td>255 / 228</td>
+<td>113 / 114</td>
+<td>0.992 / 0.993</td>
+<td>0.95 / 0.96</td>
+</tr>
+</tbody>
+</table>
+<p>The output depends mostly on two choices, the decision step and the contact radius, and even
+there at least 97% of frames keep their label.</p>
+<hr />
+<h2>6. Reproduction</h2>
+<pre><code class="language-bash">pip install -r requirements.txt          # numpy 2.2.6, pandas 2.3.3; Python 3.10+
+# put the tactical bundle in data/tactical/ (or pass --data-dir, or set MTAH_DATA_DIR)
+python solve.py                          # writes Dataculer.csv, prints its SHA-256
+python solve.py --score                  # same, plus the public-window check
+cd eval &amp;&amp; python validate_submission.py ../Dataculer.csv
+</code></pre>
+<p>Expected:</p>
+<pre><code>sha256 4c62badea9c381ccb0df958dc8aa691ac59eddbace3dc4161ae7ff752a9d0d37
+OK    Dataculer.csv   199319 rows, frame 0..199318
+</code></pre>
+<p>We obtained this hash on two machines: Linux with Python 3.13, numpy 2.5.3 and pandas 3.0.5, and
+Linux with Python 3.10, numpy 2.2.6 and pandas 2.3.3.</p>
+<p>Files read: <code>BAR-ATH_tactical_atd.txt</code>, <code>BAR-ATH_tactical_atd.xml</code> and
+<code>BAR-ATH_tactical_smart_tagging.xml</code>. Nothing else from the bundle is needed.</p></body></html>

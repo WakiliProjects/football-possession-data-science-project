@@ -1,7 +1,7 @@
 # Dataculer: Technical Document
 
 **More than a Hack 2027, Phase 1: Ball Possession**
-**Team:** Dataculer · **Submission file:** `Dataculer.csv` · **Code:** https://github.com/WakiliProjects/football-possession-data-science
+**Team:** Dataculer · **Submission file:** `Dataculer.csv` · **Code:** https://github.com/WakiliProjects/football-possession-data-science-project
 
 ---
 
